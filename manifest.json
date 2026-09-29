@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "lbarto12.omarchy-wpe",
+  "name": "Wallpaper Engine",
+  "version": "0.1.0",
+  "author": "lbarto12",
+  "license": "MIT",
+  "description": "Browse, preview, and apply Wallpaper Engine wallpapers with linux-wallpaperengine.",
+  "kinds": [
+    "overlay",
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "overlay": "Overlay.qml",
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
+  },
+  "barWidget": {
+    "displayName": "Wallpaper Engine",
+    "description": "Open the Wallpaper Engine picker",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

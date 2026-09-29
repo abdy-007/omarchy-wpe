@@ -1,14 +1,32 @@
 // Pure helpers for the overlay: parsing `wpe.sh list` output, filtering,
 // and working out which monitors currently show a wallpaper.
 
+// ok is false when the text isn't a complete list, e.g. cut off at the size cap.
 function parseList(text) {
-  var data = {}
-  try { data = JSON.parse(String(text || "")) || {} } catch (e) { data = {} }
+  var data = null
+  try { data = JSON.parse(String(text || "")) } catch (e) { data = null }
+  var ok = !!data && typeof data === "object" && Array.isArray(data.wallpapers)
 
   return {
-    active: data.active && typeof data.active === "object" ? data.active : {},
-    wallpapers: Array.isArray(data.wallpapers) ? data.wallpapers : []
+    ok: ok,
+    active: ok && data.active && typeof data.active === "object" ? data.active : {},
+    wallpapers: ok ? data.wallpapers : [],
+    truncated: ok && data.truncated === true
   }
+}
+
+// Message for a failed `wpe.sh list`, from the exit status of its wrapper.
+function listError(exitCode) {
+  if (exitCode === 124 || exitCode === 137) return "Timed out listing wallpapers"
+  if (exitCode === 3 || exitCode === 141 || exitCode === 0) return "Wallpaper library is too large to list"
+  return "Couldn't list wallpapers (exit " + exitCode + ")"
+}
+
+// Message for a failed apply/stop: the last line the backend printed.
+function actionError(exitCode, text) {
+  if (exitCode === 124 || exitCode === 137) return "Timed out; the wallpaper may not have changed"
+  var lines = String(text || "").trim().split("\n")
+  return lines[lines.length - 1] || ("wpe.sh exited with " + exitCode)
 }
 
 function matches(wallpaper, filterText) {
@@ -54,6 +72,8 @@ function typeLabel(type) {
 if (typeof module !== "undefined") {
   module.exports = {
     parseList: parseList,
+    listError: listError,
+    actionError: actionError,
     matches: matches,
     filter: filter,
     screensShowing: screensShowing,

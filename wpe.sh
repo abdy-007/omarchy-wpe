@@ -16,6 +16,13 @@ STATE_FILE="$STATE_DIR/screens.json"
 RUN_DIR="$STATE_DIR/run"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-wpe/config"
 
+# `list` output ends up in the long-lived shell process, so everything a
+# (possibly hostile) Workshop project controls is bounded. Real project.json
+# files are a few KB.
+MAX_PROJECT_BYTES=262144
+MAX_WALLPAPERS=5000
+MAX_LIST_BYTES=4194304
+
 WPE_FPS=30
 WPE_SILENT=1
 WPE_VOLUME=15
@@ -58,6 +65,8 @@ project_dirs() {
       "$lib/steamapps/workshop/content/$APP_ID"/*/ \
       "$lib/steamapps/common/wallpaper_engine/projects/myprojects"/*/ \
       "$lib/steamapps/common/wallpaper_engine/projects/defaultprojects"/*/; do
+      # Output is line-oriented, so a path with a newline or tab can't be listed.
+      [[ $dir == *[$'\n\t']* ]] && continue
       [[ -f ${dir}project.json ]] && printf '%s\n' "${dir%/}"
     done
   done < <(steam_libraries)
@@ -92,70 +101,112 @@ write_state() {
   cat >"$tmp" && mv -f "$tmp" "$STATE_FILE"
 }
 
-# Emits one object per project.
+# jq program emitting one object per project. Fields are clamped, and file
+# names must be plain names inside the project folder so a project can't point
+# the picker or the checks below at files elsewhere.
+DESCRIBE_JQ='
+  def plain_name: tostring | if test("^[^/]{1,255}$") and . != "." and . != ".." then . else "" end;
+  (input_filename | sub("/project\\.json$"; "")) as $dir
+  | ($dir | split("/") | last) as $id
+  | {
+      id: $id,
+      dir: $dir,
+      title: ((.title // "") | tostring | .[0:200] | if . == "" then $id else . end),
+      type: ((.type // "") | tostring | ascii_downcase | .[0:32]),
+      file: ((.file // "") | plain_name),
+      preview: ((.preview // "") | plain_name | if . != "" then "\($dir)/\(.)" else "" end)
+    }'
+
+# Describes the given project files with one jq run, falling back to one run
+# per file so a single malformed project.json only hides that wallpaper.
 describe_projects() {
-  jq -c '
-    (input_filename | sub("/project\\.json$"; "")) as $dir
-    | {
-        id: ($dir | split("/") | last),
-        dir: $dir,
-        title: ((.title // "") | if . == "" then ($dir | split("/") | last) else . end),
-        type: (.type // "" | ascii_downcase),
-        file: (.file // ""),
-        preview: (if (.preview // "") != "" then "\($dir)/\(.preview)" else "" end)
-      }' "$@"
+  jq -c "$DESCRIBE_JQ" "$@" 2>/dev/null && return
+  local f
+  for f; do jq -c "$DESCRIBE_JQ" "$f" 2>/dev/null; done
 }
 
-# Why linux-wallpaperengine cannot run a project, or nothing if it should.
-# Mirrors the checks the renderer fails on at startup so the picker can say
-# so up front instead of the wallpaper silently vanishing.
+# Sets REASON to why linux-wallpaperengine cannot run a project, or to nothing
+# if it should. Mirrors the checks the renderer fails on at startup so the
+# picker can say so up front instead of the wallpaper silently vanishing.
 unsupported_reason() {
   local dir=$1 type=$2 file=$3
+  REASON=""
   case $type in
-  "") echo "No project type; unsupported by linux-wallpaperengine" ;;
-  application) echo "Application wallpapers only run on Windows" ;;
+  "") REASON="No project type; unsupported by linux-wallpaperengine" ;;
+  application) REASON="Application wallpapers only run on Windows" ;;
   video | web)
-    [[ -f $dir/$file ]] || echo "Files missing; verify or re-subscribe in Steam"
+    [[ -n $file && -f $dir/$file ]] || REASON="Files missing; verify or re-subscribe in Steam"
     ;;
   scene)
-    if [[ -f $dir/$file ]]; then
-      # Unpacked scenes can be inspected; packed scene.pkg ones are assumed fine.
-      jq -e '.general.orthogonalprojection.width? // empty' "$dir/$file" >/dev/null 2>&1 ||
-        echo "3D perspective scenes are unsupported by linux-wallpaperengine"
+    if [[ -n $file && -f $dir/$file ]]; then
+      # Unpacked scenes can be inspected; packed scene.pkg ones are assumed
+      # fine. Implausibly large files are skipped rather than parsed.
+      if (($(stat -c %s "$dir/$file" 2>/dev/null || echo 0) <= 16777216)) &&
+        ! jq -e '.general.orthogonalprojection.width? // empty' "$dir/$file" >/dev/null 2>&1; then
+        REASON="3D perspective scenes are unsupported by linux-wallpaperengine"
+      fi
     elif [[ ! -f $dir/scene.pkg ]]; then
-      echo "Files missing; verify or re-subscribe in Steam"
+      REASON="Files missing; verify or re-subscribe in Steam"
     fi
     ;;
+  *) REASON="Unknown project type; unsupported by linux-wallpaperengine" ;;
   esac
+}
+
+# NUL-separated project.json paths no larger than MAX_PROJECT_BYTES, at most
+# MAX_WALLPAPERS + 1 of them (the extra one tells cmd_list it truncated).
+# Streamed through xargs so no single command gets an oversized argument list.
+project_files() {
+  local dir
+  project_dirs | while IFS= read -r dir; do printf '%s/project.json\0' "$dir"; done |
+    xargs -0 -r stat --printf '%s\t%n\0' 2>/dev/null |
+    while IFS=$'\t' read -r -d '' size path; do
+      ((size <= MAX_PROJECT_BYTES)) && printf '%s\0' "$path"
+    done |
+    head -z -n $((MAX_WALLPAPERS + 1))
 }
 
 cmd_list() {
   local -a files=()
-  local dir
-  while IFS= read -r dir; do files+=("$dir/project.json"); done < <(project_dirs)
+  local truncated=false
+  mapfile -t -d '' files < <(project_files)
+  if ((${#files[@]} > MAX_WALLPAPERS)); then
+    files=("${files[@]:0:MAX_WALLPAPERS}")
+    truncated=true
+  fi
 
   local rows=""
   if ((${#files[@]})); then
-    # One jq run for the whole library; fall back to per-file so a single
-    # malformed project.json only hides that one wallpaper.
-    if ! rows=$(describe_projects "${files[@]}" 2>/dev/null); then
-      rows=$(for f in "${files[@]}"; do describe_projects "$f" 2>/dev/null; done)
-    fi
+    export DESCRIBE_JQ
+    export -f describe_projects
+    rows=$(printf '%s\0' "${files[@]}" | xargs -0 bash -c 'describe_projects "$@"' describe)
   fi
 
-  local type file reasons=""
+  local dir type file reasons=""
   # \x1f rather than tab: tab is IFS whitespace, so an empty type would collapse.
   while IFS=$'\x1f' read -r dir type file; do
     [[ -n $dir ]] || continue
-    reasons+="$dir"$'\t'"$(unsupported_reason "$dir" "$type" "$file")"$'\n'
+    unsupported_reason "$dir" "$type" "$file"
+    reasons+="$dir"$'\t'"$REASON"$'\n'
   done < <(printf '%s\n' "$rows" | jq -r 'select(. != null) | [.dir, .type, .file] | join("\u001f")')
 
-  printf '%s\n' "$rows" | jq -cs --argjson active "$(read_state)" --arg reasons "$reasons" '
+  # Rows and reasons go in on stdin and a file: as arguments they can exceed
+  # the kernel's 128 KiB per-argument limit on large libraries.
+  local out
+  out=$(printf '%s\n' "$rows" | jq -cs --argjson active "$(read_state)" --rawfile reasons <(printf '%s' "$reasons") --argjson truncated "$truncated" '
     ($reasons | split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
     | { active: $active,
+        truncated: $truncated,
         wallpapers: (map(select(. != null) | del(.file) | .unsupported = ($why[.dir] // ""))
           | unique_by(.dir)
-          | sort_by((.unsupported != ""), (.title | ascii_downcase))) }'
+          | sort_by((.unsupported != ""), (.title | ascii_downcase))) }') || return 1
+
+  # Refuse rather than truncate: a cut-off list would be invalid JSON anyway.
+  if (($(printf '%s' "$out" | wc -c) > MAX_LIST_BYTES)); then
+    echo "omarchy-wpe: wallpaper list exceeds $MAX_LIST_BYTES bytes" >&2
+    return 3
+  fi
+  printf '%s\n' "$out"
 }
 
 # One renderer per monitor. linux-wallpaperengine drives all of its outputs

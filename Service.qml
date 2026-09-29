@@ -13,12 +13,17 @@ Item {
 
   readonly property string scriptPath: decodeURIComponent(String(Qt.resolvedUrl("wpe.sh")).replace(/^file:\/\//, ""))
 
+  // Bounded like the overlay's actions so a stuck backend can't pile up.
+  function run(command) {
+    Quickshell.execDetached(["timeout", "-k", "2", "60", scriptPath, command])
+  }
+
   function restack() {
-    Quickshell.execDetached([scriptPath, "restack"])
+    run("restack")
   }
 
   Component.onCompleted: {
-    Quickshell.execDetached([scriptPath, "restore"])
+    run("restore")
     // The shell's own background may map after this service loads.
     startupRestack.start()
   }

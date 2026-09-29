@@ -23,7 +23,17 @@ Item {
   property bool opened: false
   property bool loaded: false
   property bool busy: false
+  property bool truncated: false
   property string statusText: ""
+  property string listError: ""
+
+  // Everything the backend prints lands in this long-lived shell process, so
+  // both processes run behind `timeout` and a byte cap (head/tail), with a QML
+  // deadline as a backstop in case even the wrapper hangs.
+  readonly property int listTimeoutSeconds: 20
+  readonly property int maxListBytes: 4194304
+  readonly property int actionTimeoutSeconds: 60
+  readonly property int maxErrorBytes: 4096
   property string filterText: ""
   property int selectedIndex: 0
   property int targetIndex: 0
@@ -73,6 +83,7 @@ Item {
     statusText = ""
     busy = false
     opened = true
+    pointerGate.reset()
     selectTarget(preferredTarget)
     refresh()
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -89,15 +100,37 @@ Item {
 
   function refresh() {
     if (listProc.running) return
+    listProc.output = null
+    listProc.code = null
     listProc.running = true
+    listDeadline.restart()
   }
 
-  function loadList(text) {
+  // Output and exit status arrive separately; act once both are in.
+  function finishList() {
+    if (listProc.output === null || listProc.code === null) return
+    listDeadline.stop()
+    var code = listProc.code
+    var data = code === 0 ? Model.parseList(listProc.output) : null
+    listProc.output = null
+    listProc.code = null
+    loaded = true
+
+    if (!data || !data.ok) {
+      listError = Model.listError(code)
+      statusText = listError
+      return
+    }
+    listError = ""
+    loadList(data)
+  }
+
+  function loadList(data) {
     var previousDir = current ? current.dir : ""
-    var data = Model.parseList(text)
+    pointerGate.reset()
     active = data.active
     wallpapers = data.wallpapers
-    loaded = true
+    truncated = data.truncated
 
     var index = Model.indexOfDir(filtered, previousDir)
     if (index < 0) index = Model.indexOfDir(filtered, active[target === "all" ? firstActiveScreen() : target] || "")
@@ -121,6 +154,7 @@ Item {
 
   function setFilter(text) {
     var previousDir = current ? current.dir : ""
+    pointerGate.reset()
     filterText = text
     selectedIndex = Math.max(0, Model.indexOfDir(filtered, previousDir))
     Qt.callLater(function() { if (filtered.length > 0) grid.positionViewAtIndex(selectedIndex, GridView.Contain) })
@@ -128,8 +162,22 @@ Item {
 
   function move(delta) {
     if (filtered.length === 0) return
+    pointerGate.reset()
     selectedIndex = Math.max(0, Math.min(filtered.length - 1, selectedIndex + delta))
     grid.positionViewAtIndex(selectedIndex, GridView.Contain)
+  }
+
+  // The picker opening (or the grid scrolling) under a still pointer counts as
+  // hovering a tile. Only real pointer movement may change the selection, or
+  // Enter would apply whatever the cursor happened to rest on.
+  function selectFromPointer(index, item, mouse) {
+    if (!pointerGate.moved(item, mouse)) return
+    selectedIndex = index
+  }
+
+  PointerMoveGate {
+    id: pointerGate
+    referenceItem: card
   }
 
   function runAction(args, closeOnSuccess) {
@@ -137,8 +185,27 @@ Item {
     busy = true
     statusText = ""
     actionProc.closeOnSuccess = closeOnSuccess
-    actionProc.command = [scriptPath].concat(args)
+    actionProc.output = null
+    actionProc.code = null
+    actionProc.command = ["bash", "-c",
+      "set -o pipefail; max=$1 secs=$2; shift 2; timeout -k 2 \"$secs\" \"$@\" 2>&1 >/dev/null | tail -c \"$max\"",
+      "wpe-action", String(maxErrorBytes), String(actionTimeoutSeconds), scriptPath].concat(args)
     actionProc.running = true
+    actionDeadline.restart()
+  }
+
+  function finishAction() {
+    if (actionProc.output === null || actionProc.code === null) return
+    actionDeadline.stop()
+    var code = actionProc.code
+    var text = actionProc.output
+    actionProc.output = null
+    actionProc.code = null
+    busy = false
+
+    if (code !== 0) statusText = Model.actionError(code, text)
+    else if (actionProc.closeOnSuccess) dismiss()
+    else refresh()
   }
 
   function applyIndex(index) {
@@ -155,28 +222,68 @@ Item {
     runAction(["stop", target], false)
   }
 
+  // head -c passes at most one byte past the cap, so an oversized list reaches
+  // QML cut off (and fails to parse) instead of whole. pipefail keeps the
+  // backend's status: 124 timed out, 3 over the cap, 141 cut off by head.
   Process {
     id: listProc
-    command: [root.scriptPath, "list"]
+    property var output: null
+    property var code: null
+    command: ["bash", "-c", "set -o pipefail; timeout -k 2 \"$1\" \"$2\" list 2>/dev/null | head -c \"$3\"",
+      "wpe-list", String(root.listTimeoutSeconds), root.scriptPath, String(root.maxListBytes + 1)]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.loadList(text)
+      onStreamFinished: {
+        listProc.output = text
+        root.finishList()
+      }
+    }
+    onExited: function(exitCode) {
+      listProc.code = exitCode
+      root.finishList()
     }
   }
 
+  Timer {
+    id: listDeadline
+    interval: (root.listTimeoutSeconds + 5) * 1000
+    onTriggered: {
+      if (!listProc.running) return
+      listProc.running = false
+      root.loaded = true
+      root.listError = Model.listError(124)
+      root.statusText = root.listError
+    }
+  }
+
+  // Only the backend's stderr is kept, and only its last maxErrorBytes; stdout
+  // is discarded.
   Process {
     id: actionProc
     property bool closeOnSuccess: false
-    stderr: StdioCollector { id: actionErrors; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.busy = false
-      if (exitCode !== 0) {
-        root.statusText = String(actionErrors.text || "").trim().split("\n").pop() || ("wpe.sh exited with " + exitCode)
-      } else if (closeOnSuccess) {
-        root.dismiss()
-      } else {
-        root.refresh()
+    property var output: null
+    property var code: null
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        actionProc.output = text
+        root.finishAction()
       }
+    }
+    onExited: function(exitCode) {
+      actionProc.code = exitCode
+      root.finishAction()
+    }
+  }
+
+  Timer {
+    id: actionDeadline
+    interval: (root.actionTimeoutSeconds + 5) * 1000
+    onTriggered: {
+      if (!actionProc.running) return
+      actionProc.running = false
+      root.busy = false
+      root.statusText = Model.actionError(124, "")
     }
   }
 
@@ -302,7 +409,7 @@ Item {
             textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            text: root.loaded ? root.filtered.length + " / " + root.wallpapers.length : ""
+            text: root.loaded ? root.filtered.length + " / " + root.wallpapers.length + (root.truncated ? "+" : "") : ""
             color: root.foreground
             opacity: 0.58
             font.family: root.fontFamily
@@ -453,7 +560,7 @@ Item {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onContainsMouseChanged: if (containsMouse) root.selectedIndex = tile.index
+                onPositionChanged: function(mouse) { root.selectFromPointer(tile.index, tile, mouse) }
                 onClicked: root.applyIndex(tile.index)
               }
             }
@@ -465,6 +572,7 @@ Item {
             width: parent.width * 0.7
             visible: root.filtered.length === 0
             text: !root.loaded ? "Loading wallpapers…"
+              : root.listError && root.wallpapers.length === 0 ? root.listError
               : root.filterText ? "No matches for “" + root.filterText + "”"
               : "No Wallpaper Engine projects found.\nInstall Wallpaper Engine in Steam and subscribe to wallpapers on the Workshop."
             color: root.foreground

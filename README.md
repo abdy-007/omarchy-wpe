@@ -63,6 +63,37 @@ To open with a particular monitor preselected, pass
 
 After you stop a wallpaper, your regular Omarchy background shows again.
 
+### Temporarily disable Wallpaper Engine
+
+To temporarily stop Wallpaper Engine while keeping the current monitor
+assignments:
+
+```bash
+./wpe.sh disable
+```
+
+Enable it again and restore the saved assignments with:
+
+```bash
+./wpe.sh enable
+```
+
+Or toggle between the two states:
+
+```bash
+./wpe.sh toggle
+```
+
+When disabled, Wallpaper Engine renderers are stopped and the normal Omarchy
+background remains visible. The saved monitor assignments are preserved, so
+enabling Wallpaper Engine restores the previous configuration.
+
+Keybindings are not modified automatically by the plugin. For example:
+
+```ini
+bindd = SUPER SHIFT, J, Toggle Wallpaper Engine, exec, ~/.config/omarchy/plugins/lbarto12.omarchy-wpe/wpe.sh toggle
+```
+
 ## Configuration
 
 Optional. Create `~/.config/omarchy-wpe/config`:

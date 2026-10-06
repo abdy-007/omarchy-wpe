@@ -5,6 +5,9 @@
 #   wpe.sh list                  JSON: { active: {screen: dir}, wallpapers: [...] }
 #   wpe.sh apply <dir> [screen]  Show <dir> on <screen>, or on every monitor
 #   wpe.sh stop [screen]         Clear <screen>, or every monitor
+#   wpe.sh disable                Stop Wallpaper Engine and keep the saved assignment
+#   wpe.sh enable                 Re-enable Wallpaper Engine and restore the saved assignment
+#   wpe.sh toggle                 Toggle Wallpaper Engine on/off
 #   wpe.sh restore               Relaunch the saved assignment if not running
 #   wpe.sh restack               Put wallpapers back on top of the background layer
 
@@ -14,7 +17,14 @@ APP_ID=431960
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-wpe"
 STATE_FILE="$STATE_DIR/screens.json"
 RUN_DIR="$STATE_DIR/run"
+DISABLED_FILE="$STATE_DIR/disabled"
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-wpe/config"
+
+# Persistent local disable switch. The wallpaper assignment is preserved
+# while disabled so enable/toggle can restore it without re-picking a wallpaper.
+is_disabled() {
+  [[ -f $DISABLED_FILE ]]
+}
 
 # `list` output ends up in the long-lived shell process, so everything a
 # (possibly hostile) Workshop project controls is bounded. Real project.json
@@ -182,6 +192,11 @@ cmd_list() {
     rows=$(printf '%s\0' "${files[@]}" | xargs -0 bash -c 'describe_projects "$@"' describe)
   fi
 
+  local active="{}"
+  if ! is_disabled; then
+    active=$(read_state)
+  fi
+
   local dir type file reasons=""
   # \x1f rather than tab: tab is IFS whitespace, so an empty type would collapse.
   while IFS=$'\x1f' read -r dir type file; do
@@ -193,7 +208,7 @@ cmd_list() {
   # Rows and reasons go in on stdin and a file: as arguments they can exceed
   # the kernel's 128 KiB per-argument limit on large libraries.
   local out
-  out=$(printf '%s\n' "$rows" | jq -cs --argjson active "$(read_state)" --rawfile reasons <(printf '%s' "$reasons") --argjson truncated "$truncated" '
+  out=$(printf '%s\n' "$rows" | jq -cs --argjson active "$active" --rawfile reasons <(printf '%s' "$reasons") --argjson truncated "$truncated" '
     ($reasons | split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
     | { active: $active,
         truncated: $truncated,
@@ -280,6 +295,10 @@ start_screen() {
 # left in STARTED for wait_healthy.
 launch() {
   STARTED=()
+  if is_disabled; then
+    stop_all
+    return 0
+  fi
   mkdir -p "$RUN_DIR"
   ASSETS=$(assets_dir)
 
@@ -345,6 +364,11 @@ failure_reason() {
 }
 
 cmd_apply() {
+  if is_disabled; then
+    echo "omarchy-wpe: Wallpaper Engine is disabled; run '$0 enable' first" >&2
+    return 1
+  fi
+
   local dir=${1:-} screen=${2:-all}
   if [[ ! -f $dir/project.json ]]; then
     echo "omarchy-wpe: not a wallpaper engine project: $dir" >&2
@@ -389,12 +413,39 @@ cmd_restore() {
   launch
 }
 
+# Disable rendering without deleting the user's selected wallpapers.
+# The saved screens.json remains available for enable/toggle.
+cmd_disable() {
+  mkdir -p "$STATE_DIR"
+  : >"$DISABLED_FILE"
+  stop_all
+  echo "omarchy-wpe: Wallpaper Engine disabled"
+}
+
+# Re-enable rendering and restore the saved wallpaper assignment.
+cmd_enable() {
+  rm -f "$DISABLED_FILE"
+  cmd_restore
+  echo "omarchy-wpe: Wallpaper Engine enabled"
+}
+
+# Toggle between persistent enabled and disabled states.
+cmd_toggle() {
+  if is_disabled; then
+    cmd_enable
+  else
+    cmd_disable
+  fi
+}
+
 # Hyprland stacks surfaces within a layer in the order they were mapped, and
 # has no rule to change that. Omarchy's own background shares the background
 # layer and is re-created whenever the shell restarts, landing on top of the
 # wallpaper. Restart the renderer of any monitor where that happened so it maps
 # last again; monitors already on top are left alone.
 cmd_restack() {
+  is_disabled && return 0
+
   local layers file screen
   layers=$(hyprctl layers -j 2>/dev/null) || return 0
   for file in "$RUN_DIR"/*.pid; do
@@ -411,7 +462,8 @@ cmd_restack() {
   launch
 }
 
-if ! command -v linux-wallpaperengine >/dev/null && [[ ${1:-} != list ]]; then
+if ! command -v linux-wallpaperengine >/dev/null &&
+  [[ ${1:-} != list && ${1:-} != disable ]]; then
   echo "omarchy-wpe: linux-wallpaperengine is not installed" >&2
   exit 1
 fi
@@ -431,6 +483,9 @@ case ${1:-} in
 list) cmd_list ;;
 apply) cmd_apply "${@:2}" ;;
 stop) cmd_stop "${@:2}" ;;
+disable) cmd_disable ;;
+enable) cmd_enable ;;
+toggle) cmd_toggle ;;
 restore) cmd_restore ;;
 restack) cmd_restack ;;
 *)

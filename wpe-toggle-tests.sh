@@ -23,7 +23,7 @@ export HOME="$tmp/home"
 mkdir -p "$HOME"
 
 # Source the implementation without entering its command dispatcher.
-eval "$(sed '/^if ! command -v linux-wallpaperengine/,$d' "$WPE")"
+source <(sed '/^if ! command -v linux-wallpaperengine/,$d' "$WPE")
 
 # Unit-test state transitions without starting a real renderer.
 stop_all() { :; }
@@ -46,6 +46,9 @@ list=$(
 )
 jq -e '.disabled == true' <<<"$list" >/dev/null
 
+cmd_enable >/dev/null
+test ! -e "$DISABLED_FILE"
+cmd_disable >/dev/null
 cmd_toggle >/dev/null
 test ! -e "$DISABLED_FILE"
 cmd_toggle >/dev/null

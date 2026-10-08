@@ -88,10 +88,11 @@ When disabled, Wallpaper Engine renderers are stopped and the normal Omarchy
 background remains visible. The saved monitor assignments are preserved, so
 enabling Wallpaper Engine restores the previous configuration.
 
-Keybindings are not modified automatically by the plugin. For example:
+Keybindings are not modified automatically by the plugin. With Omarchy's
+current Lua-based Hyprland configuration, for example:
 
-```ini
-bindd = SUPER SHIFT, J, Toggle Wallpaper Engine, exec, ~/.config/omarchy/plugins/lbarto12.omarchy-wpe/wpe.sh toggle
+```lua
+o.bind("SUPER + SHIFT + J", "Toggle Wallpaper Engine", "~/.config/omarchy/plugins/lbarto12.omarchy-wpe/wpe.sh toggle")
 ```
 
 ## Configuration

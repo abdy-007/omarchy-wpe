@@ -5,9 +5,9 @@
 #   wpe.sh list                  JSON: { active: {screen: dir}, wallpapers: [...] }
 #   wpe.sh apply <dir> [screen]  Show <dir> on <screen>, or on every monitor
 #   wpe.sh stop [screen]         Clear <screen>, or every monitor
-#   wpe.sh disable                Stop Wallpaper Engine and keep the saved assignment
-#   wpe.sh enable                 Re-enable Wallpaper Engine and restore the saved assignment
-#   wpe.sh toggle                 Toggle Wallpaper Engine on/off
+#   wpe.sh disable              Stop Wallpaper Engine and keep the saved assignment
+#   wpe.sh enable               Re-enable Wallpaper Engine and restore the saved assignment
+#   wpe.sh toggle                Toggle Wallpaper Engine on/off
 #   wpe.sh restore               Relaunch the saved assignment if not running
 #   wpe.sh restack               Put wallpapers back on top of the background layer
 
@@ -207,10 +207,14 @@ cmd_list() {
 
   # Rows and reasons go in on stdin and a file: as arguments they can exceed
   # the kernel's 128 KiB per-argument limit on large libraries.
+  local disabled=false
+  is_disabled && disabled=true
+
   local out
-  out=$(printf '%s\n' "$rows" | jq -cs --argjson active "$active" --rawfile reasons <(printf '%s' "$reasons") --argjson truncated "$truncated" '
+  out=$(printf '%s\n' "$rows" | jq -cs --argjson active "$active" --argjson disabled "$disabled" --rawfile reasons <(printf '%s' "$reasons") --argjson truncated "$truncated" '
     ($reasons | split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $why
     | { active: $active,
+        disabled: $disabled,
         truncated: $truncated,
         wallpapers: (map(select(. != null) | del(.file) | .unsupported = ($why[.dir] // ""))
           | unique_by(.dir)
@@ -364,11 +368,6 @@ failure_reason() {
 }
 
 cmd_apply() {
-  if is_disabled; then
-    echo "omarchy-wpe: Wallpaper Engine is disabled; run '$0 enable' first" >&2
-    return 1
-  fi
-
   local dir=${1:-} screen=${2:-all}
   if [[ ! -f $dir/project.json ]]; then
     echo "omarchy-wpe: not a wallpaper engine project: $dir" >&2
@@ -382,7 +381,11 @@ cmd_apply() {
     connected_monitors | jq -Rn --arg dir "$dir" '[inputs | {key: ., value: $dir}] | from_entries'
   else
     jq --arg screen "$screen" --arg dir "$dir" '.[$screen] = $dir' <<<"$previous"
-  fi | write_state && launch
+  fi | write_state || return 1
+
+  # Choosing a wallpaper from the picker is an explicit request to enable WPE.
+  rm -f "$DISABLED_FILE"
+  launch
 
   if ! wait_healthy; then
     # Put back whatever was showing before rather than leaving the plain
@@ -489,7 +492,7 @@ toggle) cmd_toggle ;;
 restore) cmd_restore ;;
 restack) cmd_restack ;;
 *)
-  sed -n '2,10s/^# \{0,1\}//p' "$0" >&2
+  sed -n '2,13s/^# \{0,1\}//p' "$0" >&2
   exit 2
   ;;
 esac

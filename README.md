@@ -95,6 +95,18 @@ current Lua-based Hyprland configuration, for example:
 o.bind("SUPER + SHIFT + J", "Toggle Wallpaper Engine", "~/.config/omarchy/plugins/lbarto12.omarchy-wpe/wpe.sh toggle")
 ```
 
+### Tests
+
+Run the toggle regression tests from the repository root:
+
+```bash
+bash ./wpe-toggle-tests.sh
+```
+
+The test suite checks the shell syntax, help output, persistent disable/enable/toggle
+state, the disabled status reported by `list`, and re-enabling WPE by selecting a
+wallpaper through `apply`.
+
 ## Configuration
 
 Optional. Create `~/.config/omarchy-wpe/config`:

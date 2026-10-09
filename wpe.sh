@@ -5,8 +5,8 @@
 #   wpe.sh list                  JSON: { active: {screen: dir}, wallpapers: [...] }
 #   wpe.sh apply <dir> [screen]  Show <dir> on <screen>, or on every monitor
 #   wpe.sh stop [screen]         Clear <screen>, or every monitor
-#   wpe.sh disable              Stop Wallpaper Engine and keep the saved assignment
-#   wpe.sh enable               Re-enable Wallpaper Engine and restore the saved assignment
+#   wpe.sh disable               Stop Wallpaper Engine and keep the saved assignment
+#   wpe.sh enable                Re-enable Wallpaper Engine and restore the saved assignment
 #   wpe.sh toggle                Toggle Wallpaper Engine on/off
 #   wpe.sh restore               Relaunch the saved assignment if not running
 #   wpe.sh restack               Put wallpapers back on top of the background layer
@@ -374,8 +374,9 @@ cmd_apply() {
     return 1
   fi
 
-  local previous
+  local previous was_disabled=false
   previous=$(read_state)
+  is_disabled && was_disabled=true
 
   if [[ $screen == all ]]; then
     connected_monitors | jq -Rn --arg dir "$dir" '[inputs | {key: ., value: $dir}] | from_entries'
@@ -394,7 +395,13 @@ cmd_apply() {
     reason=$(failure_reason "$RUN_DIR/$FAILED.log")
     title=$(jq -r '.title // empty' "$dir/project.json" 2>/dev/null)
     cp -f "$RUN_DIR/$FAILED.log" "$STATE_DIR/wpe-failed.log" 2>/dev/null
-    write_state <<<"$previous" && launch
+    if write_state <<<"$previous"; then
+      # Preserve a prior disabled state so rollback cannot resurrect wallpapers.
+      if [[ $was_disabled == true ]]; then
+        : >"$DISABLED_FILE"
+      fi
+      launch
+    fi
     echo "omarchy-wpe: ${title:-wallpaper} failed to start: ${reason:-renderer crashed}" >&2
     return 1
   fi

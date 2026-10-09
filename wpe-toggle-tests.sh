@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-WPE="$ROOT/wpe.sh"
+WPE="${1:-$ROOT/wpe.sh}"
 
 bash -n "$WPE"
 
@@ -27,7 +27,14 @@ source <(sed '/^if ! command -v linux-wallpaperengine/,$d' "$WPE")
 # Unit-test state transitions without starting a real renderer.
 stop_all() { :; }
 launch() { :; }
-wait_healthy() { return 0; }
+wait_healthy() {
+  if [[ ${FAIL_APPLY:-0} == 1 ]]; then
+    FAILED=DP-1
+    return 1
+  fi
+  return 0
+}
+failure_reason() { printf 'simulated renderer failure\n'; }
 connected_monitors() { printf '%s\n' DP-1; }
 
 project="$tmp/project"
@@ -50,6 +57,20 @@ cmd_toggle >/dev/null
 test ! -e "$DISABLED_FILE"
 cmd_toggle >/dev/null
 test -f "$DISABLED_FILE"
+
+# A failed picker apply must restore the old assignment and disabled state.
+failed_project="$tmp/failed-project"
+mkdir -p "$failed_project"
+printf '{"title":"Failing wallpaper","type":"video","file":"failed.mp4"}\n' > "$failed_project/project.json"
+touch "$failed_project/failed.mp4"
+mkdir -p "$RUN_DIR"
+printf 'simulated renderer log\n' > "$RUN_DIR/DP-1.log"
+if FAIL_APPLY=1 cmd_apply "$failed_project" DP-1; then
+  echo "wpe-toggle-tests: expected failing apply to return non-zero" >&2
+  exit 1
+fi
+test -f "$DISABLED_FILE"
+jq -e --arg dir "$project" '.["DP-1"] == $dir' "$STATE_FILE" >/dev/null
 
 # Selecting a wallpaper in the picker while disabled must re-enable WPE.
 cmd_apply "$project" DP-1

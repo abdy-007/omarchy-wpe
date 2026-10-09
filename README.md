@@ -152,6 +152,19 @@ renderer exits within two seconds of applying one, the plugin puts your
 previous wallpaper back and shows the error in the picker. The failed run's
 output is kept in `~/.local/state/omarchy-wpe/wpe-failed.log`.
 
+## Tests
+
+Run the regression tests from the repository root:
+
+```bash
+./wpe-toggle-tests.sh
+```
+
+The suite checks shell syntax and help output, persistent disable/enable/toggle
+state, the disabled status returned by `list`, re-enabling by choosing a
+wallpaper in the picker, and restoring a prior disabled state if applying a
+wallpaper fails. It uses stubs and does not start a real wallpaper renderer.
+
 ## Removal
 
 ```bash

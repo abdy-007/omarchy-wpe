@@ -12,15 +12,33 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/bin/linux-wallpaperengine"
 chmod +x "$tmp/bin/linux-wallpaperengine"
+
+# Keep the test isolated from the user's real WPE state and configuration.
+export XDG_STATE_HOME="$tmp/state"
+export XDG_CONFIG_HOME="$tmp/config"
+export HOME="$tmp/home"
+mkdir -p "$HOME"
+
 help=$(PATH="$tmp/bin:$PATH" "$WPE" invalid 2>&1 || true)
 for command in list apply stop disable enable toggle restore restack; do
   grep -Fq "wpe.sh $command" <<<"$help"
 done
 
-export XDG_STATE_HOME="$tmp/state"
-export XDG_CONFIG_HOME="$tmp/config"
-export HOME="$tmp/home"
-mkdir -p "$HOME"
+# Every command description should start in the same column.
+description_columns=$(printf '%s\n' "$help" | awk '
+  /wpe\.sh list/    { print index($0, "JSON:") }
+  /wpe\.sh apply/   { print index($0, "Show <dir>") }
+  /wpe\.sh stop/    { print index($0, "Clear <screen>") }
+  /wpe\.sh disable/ { print index($0, "Stop Wallpaper Engine") }
+  /wpe\.sh enable/  { print index($0, "Re-enable Wallpaper Engine") }
+  /wpe\.sh toggle/  { print index($0, "Toggle Wallpaper Engine") }
+  /wpe\.sh restore/ { print index($0, "Relaunch") }
+  /wpe\.sh restack/ { print index($0, "Put wallpapers") }
+')
+if [[ $(printf '%s\n' "$description_columns" | sort -u | wc -l) -ne 1 ]]; then
+  echo "wpe-toggle-tests: help descriptions are not aligned" >&2
+  exit 1
+fi
 
 source <(sed '/^if ! command -v linux-wallpaperengine/,$d' "$WPE")
 
